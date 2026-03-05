@@ -574,12 +574,12 @@ class Plant(Entity):
         super().__init__(position, energy)
         self.state_machine.change_state(State.IDLE)
         
-        self.base_metabolism = 0.02
-        self.growth_rate = 2.0
+        self.base_metabolism = 0.01  # Very low metabolism for plants
+        self.growth_rate = 3.0  # Increased growth rate
         self.max_size = rng().uniform(0.8, 1.2)
-        self.size = 0.1
-        self.spread_radius = 8.0
-        self.base_reproduction_threshold = 80.0
+        self.size = 0.2  # Start slightly larger
+        self.spread_radius = 12.0  # Increased spread radius
+        self.base_reproduction_threshold = 60.0  # Lower threshold for more reproduction
         self.reproduction_threshold = self.base_reproduction_threshold
         
         # Aging
@@ -614,7 +614,7 @@ class Plant(Entity):
         """Try to spread to nearby location."""
         # Check local plant density
         nearby = world.spatial_grid.query_radius(self.position, self.spread_radius, Plant)
-        if len(nearby) >= 5:  # Too crowded
+        if len(nearby) >= 8:  # Allow more plants per area
             return
         
         # Create offspring at random nearby position
@@ -623,11 +623,12 @@ class Plant(Entity):
         offset = Vec2(math.cos(angle) * distance, math.sin(angle) * distance)
         new_pos = (self.position + offset).limit_within(world.bounds)
         
-        # Cost to reproduce
-        self.consume_energy(self.reproduction_cost)
+        # Cost to reproduce (reduced for more spreading)
+        cost = self.reproduction_cost * 0.5
+        self.consume_energy(cost)
         
         # Create new plant
-        child = Plant(new_pos, energy=30.0)
+        child = Plant(new_pos, energy=25.0)
         world.add_entity(child)
         self.children_spawned += 1
     
@@ -650,7 +651,7 @@ class Herbivore(Entity):
         # Movement
         self.max_speed = 3.0
         self.max_force = 2.0
-        self.base_metabolism = 0.15
+        self.base_metabolism = 0.10  # Reduced for better survival
         
         # Behavior parameters
         self.perception_radius = 20.0
@@ -658,9 +659,14 @@ class Herbivore(Entity):
         self.herding_radius = 15.0
         self.flee_radius = 18.0
         
-        # State thresholds
-        self.hunger_threshold = 60.0  # Start looking for food
+        # State thresholds - FIXED: hunger and reproduction aligned
+        self.hunger_threshold = 90.0  # Start looking for food (close to rep threshold)
         self.fear_threshold = 15.0    # Start fleeing
+        
+        # Reproduction - FIXED: hunger and reproduction thresholds aligned
+        self.base_reproduction_threshold = 90.0  # Same as hunger threshold
+        self.reproduction_threshold = self.base_reproduction_threshold
+        self.reproduction_cost = 35.0  # Lower cost for easier reproduction
         
         # Aging
         self.max_age = 900.0
@@ -902,9 +908,9 @@ class Herbivore(Entity):
         self.consume_energy(self.reproduction_cost)
         mate.consume_energy(mate.reproduction_cost)
         
-        # Create child at midpoint
+        # Create child at midpoint with enough energy to survive
         child_pos = (self.position + mate.position) / 2
-        child = Herbivore(child_pos, energy=self.reproduction_cost)
+        child = Herbivore(child_pos, energy=80.0)
         
         # Inherit some traits with slight mutation
         child.max_speed = (self.max_speed + mate.max_speed) / 2 * rng().uniform(0.95, 1.05)
@@ -927,17 +933,26 @@ class Carnivore(Entity):
         self.state_machine.change_state(State.WANDER)
         
         # Movement
-        self.max_speed = 5.5
+        self.max_speed = 5.0
         self.max_force = 3.0
-        self.base_metabolism = 1.0
+        self.base_metabolism = 0.2  # Reduced metabolism for better survival
         
         # Behavior parameters
-        self.perception_radius = 25.0
-        self.attack_range = 3.0
-        self.pack_radius = 20.0
+        self.perception_radius = 30.0
+        self.attack_range = 3.5
+        self.pack_radius = 25.0
         
-        # State thresholds
-        self.hunger_threshold = 180.0
+        # State thresholds - FIXED: hunger and reproduction aligned
+        self.hunger_threshold = 130.0  # Hunt when below this (close to rep threshold)
+        self.rest_threshold = 170.0  # Rest when above this (save energy)
+        
+        # Reproduction - FIXED: Lower threshold and cost for better reproduction
+        self.base_reproduction_threshold = 130.0  # Same as hunger threshold
+        self.reproduction_threshold = self.base_reproduction_threshold
+        self.reproduction_cost = 40.0  # Lower cost for easier reproduction
+        
+        # Resting energy recovery
+        self.rest_energy_recovery = 0.15  # Energy recovered per day while resting
         
         # Aging
         self.max_age = 820.0
@@ -1028,18 +1043,25 @@ class Carnivore(Entity):
                     self.state_machine.change_state(State.CHASE, target=target)
             return
         
-        # Priority 2: Mate if energy high
+        # Priority 2: Mate if can reproduce
         if self.can_reproduce() and current not in [State.CHASE, State.HUNT, State.EAT]:
-            potential_mates = [c for c in pack if c.can_reproduce()]
+            potential_mates = [c for c in pack if c.can_reproduce() and c.id != self.id]
             if potential_mates:
                 closest = min(potential_mates, key=lambda c: c.position.distance_to(self.position))
-                if closest.position.distance_to(self.position) < self.perception_radius:
+                # Increased mating range to perception radius * 1.5 for better chances
+                if closest.position.distance_to(self.position) < self.perception_radius * 1.5:
                     if current != State.MATE:
                         self.state_machine.change_state(State.MATE, mate=closest)
                     return
         
+        # Priority 3: Rest if energy is high enough (recover energy while not hunting)
+        if self.energy >= self.rest_threshold and current not in [State.MATE, State.CHASE, State.HUNT, State.EAT]:
+            if current != State.REST:
+                self.state_machine.change_state(State.REST)
+            return
+        
         # Default: Wander
-        if current in [State.IDLE, State.HUNT] and self.state_machine.state_timer > 3.0:
+        if current in [State.IDLE, State.HUNT, State.REST] and self.state_machine.state_timer > 3.0:
             self.state_machine.change_state(State.WANDER)
     
     def _execute_state(self, herbivores: List[Herbivore], pack: List['Carnivore'], 
@@ -1055,6 +1077,8 @@ class Carnivore(Entity):
             self._do_eat(dt, world)
         elif state == State.MATE:
             self._do_mate(dt, pack, world)
+        elif state == State.REST:
+            self._do_rest(dt)
         elif state == State.WANDER:
             self._do_wander(dt)
     
@@ -1082,8 +1106,8 @@ class Carnivore(Entity):
         else:
             # Pursue at high speed
             direction = (target.position - self.position).normalized()
-            self.velocity = direction * self.max_speed * 1.2
-            self.consume_energy(self.get_movement_cost(self.max_speed * 1.2) * dt * 1.5)
+            self.velocity = direction * self.max_speed * 1.1
+            self.consume_energy(self.get_movement_cost(self.max_speed * 1.1) * dt * 1.2)
     
     def _do_pack_hunt(self, dt: float, herbivores: List[Herbivore], world: 'World'):
         """Coordinated pack hunting."""
@@ -1091,8 +1115,8 @@ class Carnivore(Entity):
             # Follow leader
             if self.pack_leader:
                 direction = (self.pack_leader.position - self.position).normalized()
-                self.velocity = direction * self.max_speed * 0.9
-                self.consume_energy(self.get_movement_cost(self.max_speed * 0.9) * dt)
+                self.velocity = direction * self.max_speed * 0.8
+                self.consume_energy(self.get_movement_cost(self.max_speed * 0.8) * dt)
             return
         
         # Leader coordinates the hunt
@@ -1116,7 +1140,7 @@ class Carnivore(Entity):
         
         # Leader moves directly toward target
         direction = (target_pos - self.position).normalized()
-        self.velocity = direction * self.max_speed
+        self.velocity = direction * self.max_speed * 0.95
         
         # Check if caught
         if self.position.distance_to(target_pos) <= self.attack_range:
@@ -1127,7 +1151,7 @@ class Carnivore(Entity):
                 self.state_machine.change_state(State.EAT, food=target)
             return
         
-        self.consume_energy(self.get_movement_cost(self.max_speed) * dt * 1.3)
+        self.consume_energy(self.get_movement_cost(self.max_speed * 0.95) * dt * 1.1)
     
     def _do_eat(self, dt: float, world: 'World'):
         """Consume prey."""
@@ -1173,6 +1197,15 @@ class Carnivore(Entity):
         self.velocity = self.velocity.clamp_magnitude(self.max_speed * 0.6)
         self.consume_energy(self.get_movement_cost(self.velocity.length()) * dt)
     
+    def _do_rest(self, dt: float):
+        """Rest to recover energy - minimal movement, energy recovery."""
+        # Stop moving while resting
+        self.velocity = self.velocity * 0.9  # Gradually slow down
+        
+        # Recover energy while resting (simulates digestion/rest)
+        if self.energy < self.max_energy:
+            self.gain_energy(self.rest_energy_recovery * dt)
+    
     def _attack(self, prey: Herbivore, world: 'World'):
         """Attack and kill prey."""
         damage = self.attack_damage * self.hunt_bonus
@@ -1180,7 +1213,8 @@ class Carnivore(Entity):
         # Calculate how much energy we can take
         # We take either the damage dealt or what's left of prey
         energy_available = min(prey.energy, damage)
-        energy_to_gain = min(energy_available * 0.8, self.max_energy - self.energy)
+        # Increased energy gain from 0.8 to 0.9 for better carnivore survival
+        energy_to_gain = min(energy_available * 0.9, self.max_energy - self.energy)
         
         # Prey tries to flee but takes damage
         prey.consume_energy(damage)
@@ -1208,7 +1242,8 @@ class Carnivore(Entity):
         mate.consume_energy(mate.reproduction_cost)
         
         child_pos = (self.position + mate.position) / 2
-        child = Carnivore(child_pos, energy=self.reproduction_cost)
+        # Child starts with enough energy to survive and potentially reproduce
+        child = Carnivore(child_pos, energy=100.0)
         
         # Inherit traits
         child.max_speed = (self.max_speed + mate.max_speed) / 2 * rng().uniform(0.95, 1.05)
@@ -1335,46 +1370,89 @@ class World:
             self.stat_timer = 0.0
     
     def _update_dynamic_reproduction(self):
-        """Adjust reproduction thresholds based on population pressure."""
+        """Adjust reproduction thresholds based on population pressure.
+        IMPORTANT: Threshold must always be >= reproduction_cost to allow reproduction.
+        """
         plant_count = len(self.plants)
         herbivore_count = len(self.herbivores)
         carnivore_count = len(self.carnivores)
         
-        # Plants: boost reproduction if population is low
+        # Plants: boost reproduction if population is low, reduce if too high
         plant_threshold_multiplier = 1.0
-        if plant_count < 100:
-            plant_threshold_multiplier = 0.6
-        elif plant_count < 200:
-            plant_threshold_multiplier = 0.8
+        if plant_count < 50:
+            plant_threshold_multiplier = 0.3  # Emergency boost
+        elif plant_count < 100:
+            plant_threshold_multiplier = 0.5
+        elif plant_count < 150:
+            plant_threshold_multiplier = 0.7
+        elif plant_count > 400:
+            plant_threshold_multiplier = 1.5  # Slow down when too many
+        elif plant_count > 300:
+            plant_threshold_multiplier = 1.2
         
-        # Herbivores: reduce reproduction if crowded
+        # Herbivores: balance based on food availability and predator presence
         herbivore_threshold_multiplier = 1.0
-        if herbivore_count > 60:
+        plants_per_herbivore = plant_count / max(1, herbivore_count)
+        
+        if herbivore_count < 10:
+            herbivore_threshold_multiplier = 0.5  # Emergency boost when critically low
+        elif herbivore_count < 20:
+            herbivore_threshold_multiplier = 0.7
+        elif plants_per_herbivore < 2:
+            herbivore_threshold_multiplier = 1.8  # Starvation prevention
+        elif plants_per_herbivore < 4:
             herbivore_threshold_multiplier = 1.4
-        elif herbivore_count > 40:
-            herbivore_threshold_multiplier = 1.2
+        elif herbivore_count > 80:
+            herbivore_threshold_multiplier = 1.6
+        elif herbivore_count > 60:
+            herbivore_threshold_multiplier = 1.3
         
-        # Carnivores: reduce reproduction if crowded
+        # Carnivores: boost when low, reduce when high relative to prey
         carnivore_threshold_multiplier = 1.0
-        if carnivore_count > 20:
-            carnivore_threshold_multiplier = 1.5
-        elif carnivore_count > 12:
-            carnivore_threshold_multiplier = 1.25
+        herbivores_per_carnivore = herbivore_count / max(1, carnivore_count)
         
+        if carnivore_count < 3:
+            carnivore_threshold_multiplier = 0.4  # Emergency boost - critical!
+        elif carnivore_count < 6:
+            carnivore_threshold_multiplier = 0.6
+        elif carnivore_count < 10:
+            carnivore_threshold_multiplier = 0.8
+        elif herbivores_per_carnivore < 3:
+            carnivore_threshold_multiplier = 1.5  # Not enough prey
+        elif herbivores_per_carnivore < 5:
+            carnivore_threshold_multiplier = 1.2
+        elif carnivore_count > 20:
+            carnivore_threshold_multiplier = 1.5
+        elif carnivore_count > 15:
+            carnivore_threshold_multiplier = 1.2
+        
+        # Apply thresholds with MINIMUM constraint: threshold must be >= reproduction_cost
+        # This ensures reproduction is always possible when energy is available
         for plant in self.plants:
-            plant.reproduction_threshold = plant.base_reproduction_threshold * plant_threshold_multiplier
+            new_threshold = plant.base_reproduction_threshold * plant_threshold_multiplier
+            # Ensure threshold is at least reproduction_cost (which is energy * 0.4 * 0.5 for plants)
+            min_threshold = plant.reproduction_cost + 5.0  # Small buffer
+            plant.reproduction_threshold = max(new_threshold, min_threshold)
+        
         for herbivore in self.herbivores:
-            herbivore.reproduction_threshold = herbivore.base_reproduction_threshold * herbivore_threshold_multiplier
+            new_threshold = herbivore.base_reproduction_threshold * herbivore_threshold_multiplier
+            # Ensure threshold is at least reproduction_cost + buffer
+            min_threshold = herbivore.reproduction_cost + 10.0  # Buffer for safety
+            herbivore.reproduction_threshold = max(new_threshold, min_threshold)
+        
         for carnivore in self.carnivores:
-            carnivore.reproduction_threshold = carnivore.base_reproduction_threshold * carnivore_threshold_multiplier
+            new_threshold = carnivore.base_reproduction_threshold * carnivore_threshold_multiplier
+            # Ensure threshold is at least reproduction_cost + buffer
+            min_threshold = carnivore.reproduction_cost + 10.0  # Buffer for safety
+            carnivore.reproduction_threshold = max(new_threshold, min_threshold)
         
         # Log key changes
-        if plant_threshold_multiplier < 1.0:
-            self.log_event("Low plant population: boosted plant reproduction")
-        if herbivore_threshold_multiplier > 1.0:
-            self.log_event("High herbivore population: reduced herbivore reproduction")
-        if carnivore_threshold_multiplier > 1.0:
-            self.log_event("High carnivore population: reduced carnivore reproduction")
+        if plant_threshold_multiplier < 0.7:
+            self.log_event(f"Low plant population ({plant_count}): boosted plant reproduction")
+        if herbivore_threshold_multiplier < 0.8:
+            self.log_event(f"Low herbivore population ({herbivore_count}): boosted reproduction")
+        if carnivore_threshold_multiplier < 0.8:
+            self.log_event(f"Low carnivore population ({carnivore_count}): boosted reproduction")
 
     def _collect_stats(self):
         """Collect simulation statistics."""
@@ -1450,9 +1528,14 @@ class Simulation:
                 self._print_status()
                 last_print = self.world.time
             
-            # Check for extinction
+            # Check for extinction - simulation ends if all animals die
             if (len(self.world.herbivores) == 0 and len(self.world.carnivores) == 0):
                 print("\n!!! EXTINCTION EVENT - All animals have died !!!")
+                break
+            
+            # Check if simulation is stuck (no plants and no animals can survive)
+            if len(self.world.plants) == 0 and len(self.world.herbivores) == 0:
+                print("\n!!! COMPLETE COLLAPSE - No food chain remaining !!!")
                 break
         
         self.running = False
@@ -1522,11 +1605,11 @@ def main():
     # Create simulation with fixed seed for reproducibility
     sim = Simulation(seed=12345, world_size=200.0)
     
-    # Setup initial conditions
+    # Setup initial conditions - balanced for stable ecosystem
     sim.setup(
-        plants=200,
-        herbivores=50,
-        carnivores=12
+        plants=250,       # More plants for stable base
+        herbivores=35,    # Moderate herbivore population
+        carnivores=15     # Enough carnivores to control herbivores
     )
     
     # Run for 3 years with weekly updates
@@ -1537,3 +1620,4 @@ def main():
 
 if __name__ == "__main__":
     sim = main()
+
